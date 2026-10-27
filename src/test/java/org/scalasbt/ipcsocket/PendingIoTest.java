@@ -31,7 +31,17 @@ public class PendingIoTest extends BaseSocketSetup {
                         throw new UncheckedIOException(e);
                       }
                     });
-            Socket client = newClientSocket(sock);
+            // on Windows the pipe only exists once accept() has created it
+            Socket connected = null;
+            for (int attempt = 0; connected == null; attempt++) {
+              try {
+                connected = newClientSocket(sock);
+              } catch (IOException e) {
+                if (attempt >= 100) throw e;
+                Thread.sleep(50);
+              }
+            }
+            Socket client = connected;
             Socket server = get(accepted);
 
             // a read with nothing to read yet
