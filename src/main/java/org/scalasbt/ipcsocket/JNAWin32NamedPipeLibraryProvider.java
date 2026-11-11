@@ -137,41 +137,49 @@ class JNAWin32NamedPipeLibraryProvider implements Win32NamedPipeLibraryProvider 
     olap.write();
 
     boolean timedOut = false;
-    boolean immediate = delegate.ReadFile(handle, readBuffer, len, null, olap.getPointer());
-    if (!immediate) {
-      int lastError = delegate.GetLastError();
-      if (lastError != WinError.ERROR_IO_PENDING) {
-        throw new IOException("ReadFile() failed: " + lastError);
-      }
-      if (timeoutMillis > 0) {
-        int res = delegate.WaitForSingleObject(olap.hEvent, timeoutMillis);
-        if (res == WinError.WAIT_TIMEOUT) {
-          // The kernel still owns olap and readBuffer: wait below until the cancel completes
-          delegate.CancelIoEx(handle, olap.getPointer());
-          timedOut = true;
+    int actualLen;
+    try {
+      boolean immediate = delegate.ReadFile(handle, readBuffer, len, null, olap.getPointer());
+      if (!immediate) {
+        int lastError = delegate.GetLastError();
+        if (lastError != WinError.ERROR_IO_PENDING) {
+          throw new IOException("ReadFile() failed: " + lastError);
+        }
+        if (timeoutMillis > 0) {
+          int res = delegate.WaitForSingleObject(olap.hEvent, timeoutMillis);
+          if (res == WinError.WAIT_TIMEOUT) {
+            // Cancel only this read, not every operation on the handle: another thread may be
+            // writing to the same pipe. CancelIoEx is asynchronous, and the kernel still owns
+            // olap and readBuffer, so wait below until the cancel completes.
+            delegate.CancelIoEx(handle, olap.getPointer());
+            timedOut = true;
+          }
         }
       }
-    }
-    IntByReference r = new IntByReference();
-    if (!delegate.GetOverlappedResult(handle, olap.getPointer(), r, true)) {
-      int lastError = delegate.GetLastError();
-      if (timedOut && lastError == WinError.ERROR_OPERATION_ABORTED) {
-        throw new SocketTimeoutException("ReadFile() timed out after " + timeoutMillis + " ms");
+      IntByReference r = new IntByReference();
+      if (!delegate.GetOverlappedResult(handle, olap.getPointer(), r, true)) {
+        int lastError = delegate.GetLastError();
+        if (timedOut && lastError == WinError.ERROR_OPERATION_ABORTED) {
+          throw new SocketTimeoutException("ReadFile() timed out after " + timeoutMillis + " ms");
+        }
+        throw new IOException("GetOverlappedResult() failed for read operation: " + lastError);
       }
-      throw new IOException("GetOverlappedResult() failed for read operation: " + lastError);
+      // If data arrived before the cancel took effect, the read succeeded after all
+      actualLen = r.getValue();
+      if (requireStrictLength && (actualLen != len)) {
+        throw new IOException(
+            "ReadFile() read less bytes than requested: expected "
+                + len
+                + " bytes, but read "
+                + actualLen
+                + " bytes");
+      }
+      readBuffer.read(0, buffer, offset, actualLen);
+    } finally {
+      // Every path out of the try is after GetOverlappedResult returned, or after ReadFile failed
+      // without starting an operation, so the kernel is done with readBuffer and olap
+      readBuffer.close();
     }
-    // If data arrived before the cancel took effect, the read succeeded after all
-    int actualLen = r.getValue();
-    if (requireStrictLength && (actualLen != len)) {
-      throw new IOException(
-          "ReadFile() read less bytes than requested: expected "
-              + len
-              + " bytes, but read "
-              + actualLen
-              + " bytes");
-    }
-    readBuffer.read(0, buffer, offset, actualLen);
-    readBuffer.close();
     return actualLen;
   }
 

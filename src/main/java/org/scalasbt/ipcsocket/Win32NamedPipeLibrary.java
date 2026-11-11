@@ -21,7 +21,6 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.io.IOException;
-import java.nio.ByteBuffer;
 
 import com.sun.jna.*;
 import com.sun.jna.platform.win32.WinNT;
@@ -73,13 +72,6 @@ public interface Win32NamedPipeLibrary extends Library, WinNT {
       Memory lpBuffer,
       int nNumberOfBytesToRead,
       IntByReference lpNumberOfBytesRead,
-      Pointer lpOverlapped);
-
-  boolean WriteFile(
-      HANDLE hFile,
-      ByteBuffer lpBuffer,
-      int nNumberOfBytesToWrite,
-      IntByReference lpNumberOfBytesWritten,
       Pointer lpOverlapped);
 
   boolean WriteFile(
