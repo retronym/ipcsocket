@@ -152,44 +152,69 @@ Java_org_scalasbt_ipcsocket_JNIWin32NamedPipeLibraryProvider_readNative(
   OVERLAPPED olap = {0};
   olap.hEvent = (HANDLE)waitable;
 
+  if (length == 0) {
+    return 0;
+  }
   DWORD bytes_read = 0;
   LPVOID read_buffer = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, length);
+  if (read_buffer == NULL) {
+    THROW_IO(NULL, "HeapAlloc() failed for read buffer");
+    return -1;
+  }
+  BOOL timed_out = FALSE;
   BOOL immediate = ReadFile(handle, read_buffer, length, &bytes_read, &olap);
   if (!immediate) {
     if (GetLastError() != ERROR_IO_PENDING) {
+      // No operation was started, so nothing owns olap or read_buffer
       char buf[256];
       FILL_ERROR("ReadFile() failed: %s (error code %ld)", buf);
+      HeapFree(GetProcessHeap(), 0, read_buffer);
       THROW_IO(NULL, buf);
+      return -1;
     }
     if (timeoutMillis > 0) {
       DWORD res = WaitForSingleObject(olap.hEvent, timeoutMillis);
       if (res == WAIT_TIMEOUT) {
-        CancelIoEx(handle, NULL);
-        char buf[256];
-        FILL_ERROR("ReadFile() timed out: %s (error code %ld)", buf);
-        THROW_SOCKET_TIMEOUT(NULL, buf);
+        // Cancel only this read, not every operation on the handle: another
+        // thread may be writing to the same pipe. CancelIoEx is asynchronous,
+        // and the kernel keeps writing to olap and read_buffer until the
+        // cancel completes, so GetOverlappedResult below must wait for it
+        // before this frame and the buffer go away.
+        CancelIoEx(handle, &olap);
+        timed_out = TRUE;
       }
     }
   }
   if (!GetOverlappedResult(handle, &olap, &bytes_read, TRUE)) {
+    DWORD error = GetLastError();
     char buf[256];
+    if (timed_out && error == ERROR_OPERATION_ABORTED) {
+      snprintf(buf, 256, "ReadFile() timed out after %d ms", timeoutMillis);
+      HeapFree(GetProcessHeap(), 0, read_buffer);
+      THROW_SOCKET_TIMEOUT(NULL, buf);
+      return -1;
+    }
     FILL_ERROR(
         "GetOverlappedResult() failed for read operation: %s (error code %ld)",
         buf);
+    HeapFree(GetProcessHeap(), 0, read_buffer);
     THROW_IO(NULL, buf);
+    return -1;
   }
+  // If data arrived before the cancel took effect, the read succeeded after all
   if (strict && (bytes_read != (DWORD)length)) {
     char buf[256];
     snprintf(buf, 256,
              "ReadFile() read less bytes than requested: expected %d bytes, "
              "but read %ld bytes",
              length, bytes_read);
+    HeapFree(GetProcessHeap(), 0, read_buffer);
     THROW_IO(NULL, buf);
+    return -1;
   }
   (*env)->SetByteArrayRegion(env, buffer, offset, bytes_read, read_buffer);
   HeapFree(GetProcessHeap(), 0, read_buffer);
   return bytes_read;
-  return -1;
 }
 
 /*
@@ -202,36 +227,52 @@ Java_org_scalasbt_ipcsocket_JNIWin32NamedPipeLibraryProvider_writeNative(
     JNIEnv *env, UNUSED jobject object, jlong waitable, jlong hHandle,
     jbyteArray buffer, jint offset, jint length) {
   HANDLE handle = (HANDLE)hHandle;
-  OVERLAPPED olap;
+  // Zeroed: Windows reads Internal/InternalHigh/Offset from the struct
+  OVERLAPPED olap = {0};
   olap.hEvent = (HANDLE)waitable;
 
+  if (length == 0) {
+    return;
+  }
+  // Pinned or copied until ReleaseByteArrayElements, which runs only after
+  // GetOverlappedResult says the kernel is done reading from it
   jbyte *bytes = (*env)->GetByteArrayElements(env, buffer, 0);
+  if (bytes == NULL) {
+    return;  // OutOfMemoryError is pending
+  }
   BOOL immediate =
       WriteFile(handle, bytes + (DWORD)offset, (DWORD)length, NULL, &olap);
   if (!immediate) {
     if (GetLastError() != ERROR_IO_PENDING) {
+      // No operation was started, so nothing owns olap or bytes
       char buf[256];
-      FILL_ERROR("ReadFile() failed: %s (error code %ld)", buf);
+      FILL_ERROR("WriteFile() failed: %s (error code %ld)", buf);
+      (*env)->ReleaseByteArrayElements(env, buffer, bytes, JNI_ABORT);
       THROW_IO(NULL, buf);
+      return;
     }
   }
   DWORD bytes_written = 0;
-  if (!GetOverlappedResult(handle, &olap, &bytes_written, TRUE)) {
-    char buf[256];
+  BOOL ok = GetOverlappedResult(handle, &olap, &bytes_written, TRUE);
+  char buf[256];
+  if (!ok) {
     FILL_ERROR(
         "GetOverlappedResult() failed for write operation: %s (error code %ld)",
         buf);
+  }
+  (*env)->ReleaseByteArrayElements(env, buffer, bytes, JNI_ABORT);
+  if (!ok) {
     THROW_IO(NULL, buf);
+    return;
   }
   if (bytes_written != (DWORD)length) {
-    char buf[256];
     snprintf(buf, 256,
              "WriteFile() wrote less bytes than requested: expected %d bytes, "
              "but wrote %ld bytes",
              length, bytes_written);
     THROW_IO(NULL, buf);
+    return;
   }
-  (*env)->ReleaseByteArrayElements(env, buffer, bytes, JNI_ABORT);
 }
 
 JNIEXPORT jboolean JNICALL
