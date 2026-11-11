@@ -191,6 +191,8 @@ public class UnixDomainServerSocket extends ServerSocket {
       int clientFd = provider.accept(fd.get());
       return new UnixDomainSocket(clientFd, useJNI);
     } catch (NativeErrorException e) {
+      // A close() that woke this accept() may not have set isClosed yet; isClosed() is
+      // synchronized, so this waits for it to finish
       if (isClosed()) {
         throw new SocketException("Socket is closed");
       }
@@ -202,8 +204,10 @@ public class UnixDomainServerSocket extends ServerSocket {
     if (isClosed) {
       return;
     }
+    // Releases the TCP socket the base class creates for options such as setSoTimeout. Before
+    // isClosed is set: on JDK 8 and 11 the base close() returns early when isClosed() is true.
+    super.close();
     try {
-
       // Ensure any pending call to accept() fails. On Linux, closing the socket doesn't wake a
       // blocked accept(), but shutting it down does.
       int socketFd = fd.getAndSet(-1);
@@ -213,12 +217,11 @@ public class UnixDomainServerSocket extends ServerSocket {
         // macOS doesn't support shutdown on a listening socket, but closing wakes accept() there
       }
       provider.close(socketFd);
-      isClosed = true;
     } catch (NativeErrorException e) {
       throw new IOException(e);
     } finally {
-      // releases the TCP socket the base class creates for options such as setSoTimeout
-      super.close();
+      // The fd is gone either way; a second close() must not try to close it again
+      isClosed = true;
     }
   }
 }

@@ -247,6 +247,13 @@ public class Win32NamedPipeServerSocket extends ServerSocket {
   }
 
   public void close() throws IOException {
+    if (closed.get()) {
+      return;
+    }
+    // Releases the TCP socket the base class creates for options such as setSoTimeout. Before
+    // closed is set: on JDK 8 and 11 the base close() returns early when isClosed() is true.
+    // It is idempotent, so two threads racing here is fine.
+    super.close();
     // A second close would close lockHandle again, by then maybe another object's handle
     if (!closed.compareAndSet(false, true)) {
       return;
@@ -265,8 +272,6 @@ public class Win32NamedPipeServerSocket extends ServerSocket {
       }
     } finally {
       provider.CloseHandle(lockHandle);
-      // releases the TCP socket the base class creates for options such as setSoTimeout
-      super.close();
     }
   }
 
